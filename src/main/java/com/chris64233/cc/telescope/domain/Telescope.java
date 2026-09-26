@@ -31,6 +31,12 @@ public class Telescope {
     @Column(nullable = false)
     private long switchMinutes;
 
+    /**
+     * 日程版本号：每次成功抢占确认导致日程变更时自增。
+     */
+    @Column(nullable = false)
+    private long scheduleVersion = 0;
+
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "telescope_instruments", joinColumns = @JoinColumn(name = "telescope_id"))
     @Column(name = "instrument", nullable = false)
@@ -68,5 +74,14 @@ public class Telescope {
 
     public boolean supports(String instrument) {
         return instruments.contains(instrument);
+    }
+
+    public long getScheduleVersion() {
+        return scheduleVersion;
+    }
+
+    public long bumpScheduleVersion() {
+        this.scheduleVersion += 1;
+        return this.scheduleVersion;
     }
 }

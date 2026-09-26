@@ -4,6 +4,7 @@ import com.chris64233.cc.telescope.domain.Proposal;
 import com.chris64233.cc.telescope.domain.Reservation;
 import com.chris64233.cc.telescope.domain.ReservationStatus;
 import com.chris64233.cc.telescope.domain.Telescope;
+import com.chris64233.cc.telescope.repository.OpportunityProposalRepository;
 import com.chris64233.cc.telescope.repository.ProposalRepository;
 import com.chris64233.cc.telescope.repository.ReservationRepository;
 import com.chris64233.cc.telescope.repository.TelescopeRepository;
@@ -12,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -21,13 +23,16 @@ public class BookingService {
     private final TelescopeRepository telescopeRepository;
     private final ProposalRepository proposalRepository;
     private final ReservationRepository reservationRepository;
+    private final OpportunityProposalRepository opportunityProposalRepository;
 
     public BookingService(TelescopeRepository telescopeRepository,
                           ProposalRepository proposalRepository,
-                          ReservationRepository reservationRepository) {
+                          ReservationRepository reservationRepository,
+                          OpportunityProposalRepository opportunityProposalRepository) {
         this.telescopeRepository = telescopeRepository;
         this.proposalRepository = proposalRepository;
         this.reservationRepository = reservationRepository;
+        this.opportunityProposalRepository = opportunityProposalRepository;
     }
 
     @Transactional
@@ -99,21 +104,32 @@ public class BookingService {
     }
 
     private void checkSchedule(Telescope telescope, String instrument, Instant startTime, Instant endTime) {
-        boolean overlaps = reservationRepository.existsByTelescopeAndStatusAndStartTimeLessThanAndEndTimeGreaterThan(
-                telescope, ReservationStatus.ACTIVE, endTime, startTime);
+        List<Reservation> active = reservationRepository
+                .findByTelescopeAndStatusOrderByStartTimeAscIdAsc(telescope, ReservationStatus.ACTIVE);
+        validateAgainstSchedule(telescope, instrument, startTime, endTime, active);
+    }
+
+    /**
+     * 针对给定的有效预订集合校验新时段：不得与任一预订重叠，且与前、后相邻预订使用不同仪器时
+     * 必须满足切换准备时长。调用方须已持有望远镜行级悲观锁。
+     */
+    void validateAgainstSchedule(Telescope telescope, String instrument, Instant startTime, Instant endTime,
+                                 List<Reservation> active) {
+        boolean overlaps = active.stream().anyMatch(r ->
+                r.getStartTime().isBefore(endTime) && r.getEndTime().isAfter(startTime));
         if (overlaps) {
             throw new ScheduleConflictException("该时段与望远镜 " + telescope.getCode() + " 上的已有预订重叠");
         }
 
         Duration switchTime = Duration.ofMinutes(telescope.getSwitchMinutes());
-        reservationRepository
-                .findFirstByTelescopeAndStatusAndEndTimeLessThanEqualOrderByEndTimeDescIdDesc(
-                        telescope, ReservationStatus.ACTIVE, startTime)
+        active.stream()
+                .filter(r -> !r.getEndTime().isAfter(startTime))
+                .max(Comparator.comparing(Reservation::getEndTime).thenComparing(Reservation::getId))
                 .ifPresent(predecessor -> requireSwitchGap(predecessor.getInstrument(), instrument,
                         predecessor.getEndTime(), startTime, switchTime));
-        reservationRepository
-                .findFirstByTelescopeAndStatusAndStartTimeGreaterThanEqualOrderByStartTimeAscIdAsc(
-                        telescope, ReservationStatus.ACTIVE, endTime)
+        active.stream()
+                .filter(r -> !r.getStartTime().isBefore(endTime))
+                .min(Comparator.comparing(Reservation::getStartTime).thenComparing(Reservation::getId))
                 .ifPresent(successor -> requireSwitchGap(instrument, successor.getInstrument(),
                         endTime, successor.getStartTime(), switchTime));
     }
@@ -131,28 +147,69 @@ public class BookingService {
 
     @Transactional
     public Reservation cancel(Long reservationId) {
+        // 规范加锁顺序：望远镜行锁 → 配额账户行锁 → 预订行锁（与抢占/重排一致，消除跨望远镜死锁）。
+        // 望远镜编号与账户都用投影读取，避免把预订实体无锁加载进一级缓存而使后续 FOR UPDATE 读到陈旧状态。
+        String telescopeCode = reservationRepository.findTelescopeCodeById(reservationId);
+        if (telescopeCode == null) {
+            throw new ResourceNotFoundException("预订不存在: " + reservationId);
+        }
+        telescopeRepository.findByCodeForUpdate(telescopeCode);
+
+        // 用单列标量定位账户类型（不加载预订实体进一级缓存）；两个账户 ID 皆空表示预订不存在
+        Long normalAccountId = reservationRepository.findProposalIdById(reservationId);
+        Long opportunityAccountId = reservationRepository.findOpportunityIdById(reservationId);
+        boolean opportunityAccount;
+        Long accountId;
+        if (opportunityAccountId != null) {
+            opportunityAccount = true;
+            accountId = opportunityAccountId;
+        } else if (normalAccountId != null) {
+            opportunityAccount = false;
+            accountId = normalAccountId;
+        } else {
+            throw new ResourceNotFoundException("预订不存在: " + reservationId);
+        }
+        if (opportunityAccount) {
+            opportunityProposalRepository.findByIdForUpdate(accountId);
+        } else {
+            proposalRepository.findByIdForUpdate(accountId);
+        }
+
+        // 预订实体的首次加载即加行锁，状态判断与退款在锁内完成
         Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException("预订不存在: " + reservationId));
-        if (reservation.getStatus() == ReservationStatus.CANCELLED) {
-            return reservation;
-        }
         Instant now = Instant.now();
-        if (!now.isBefore(reservation.getStartTime())) {
-            throw new CancellationNotAllowedException("预订已开始，不能取消");
+        switch (reservation.getStatus()) {
+            case CANCELLED, RESCHEDULED -> {
+                // 重复取消/已重排：幂等返回，不再触碰配额
+                return reservation;
+            }
+            case PENDING_RESCHEDULE -> {
+                // 抢占时配额已归还；放弃待重排任务不再归还
+                reservation.abandonPending(now);
+                return reservation;
+            }
+            case ACTIVE -> {
+                if (!now.isBefore(reservation.getStartTime())) {
+                    throw new CancellationNotAllowedException("预订已开始，不能取消");
+                }
+                if (opportunityAccount) {
+                    reservation.getOpportunity().refund(reservation.getDurationMinutes());
+                } else {
+                    reservation.getProposal().refund(reservation.getDurationMinutes());
+                }
+                reservation.cancel(now);
+                return reservation;
+            }
+            default -> throw new IllegalStateException("未知预订状态: " + reservation.getStatus());
         }
-        Proposal proposal = proposalRepository.findByIdForUpdate(reservation.getProposal().getId())
-                .orElseThrow(() -> new ResourceNotFoundException("提案不存在"));
-        proposal.refund(reservation.getDurationMinutes());
-        reservation.cancel(now);
-        return reservation;
     }
 
     @Transactional(readOnly = true)
     public List<Reservation> schedule(String telescopeCode) {
         Telescope telescope = telescopeRepository.findByCode(telescopeCode)
                 .orElseThrow(() -> new ResourceNotFoundException("望远镜不存在: " + telescopeCode));
-        return reservationRepository.findByTelescopeAndStatusOrderByStartTimeAscIdAsc(
-                telescope, ReservationStatus.ACTIVE);
+        return reservationRepository.findScheduleForRead(telescope, ReservationStatus.ACTIVE);
     }
 
     @Transactional(readOnly = true)
@@ -163,7 +220,7 @@ public class BookingService {
 
     @Transactional(readOnly = true)
     public Reservation findReservation(Long reservationId) {
-        return reservationRepository.findById(reservationId)
+        return reservationRepository.findDetailedById(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException("预订不存在: " + reservationId));
     }
 
