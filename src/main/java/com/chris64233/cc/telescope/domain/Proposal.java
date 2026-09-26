@@ -11,6 +11,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 
+import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -36,14 +37,36 @@ public class Proposal {
     @Column(nullable = false)
     private long remainingQuotaMinutes;
 
+    /** 是否为目标机会（ToO）提案；普通提案为 false。 */
+    @Column(nullable = false)
+    private boolean targetOpportunity;
+
+    /** 目标机会提案优先级，数值越大优先级越高；普通提案为 null。 */
+    private Integer priority;
+
+    /**
+     * 有效期截止时间（含响应时限语义）：
+     * ToO 提案必须在此之前完成抢占确认；被抢占预订只能在此之前重排。
+     * 普通提案可为 null（不限制重排窗口）。
+     */
+    private Instant validUntil;
+
     protected Proposal() {
     }
 
     public Proposal(String code, Set<String> allowedInstruments, long totalQuotaMinutes) {
+        this(code, allowedInstruments, totalQuotaMinutes, false, null, null);
+    }
+
+    public Proposal(String code, Set<String> allowedInstruments, long totalQuotaMinutes,
+                    boolean targetOpportunity, Integer priority, Instant validUntil) {
         this.code = code;
         this.allowedInstruments = new LinkedHashSet<>(allowedInstruments);
         this.totalQuotaMinutes = totalQuotaMinutes;
         this.remainingQuotaMinutes = totalQuotaMinutes;
+        this.targetOpportunity = targetOpportunity;
+        this.priority = priority;
+        this.validUntil = validUntil;
     }
 
     public Long getId() {
@@ -64,6 +87,18 @@ public class Proposal {
 
     public long getRemainingQuotaMinutes() {
         return remainingQuotaMinutes;
+    }
+
+    public boolean isTargetOpportunity() {
+        return targetOpportunity;
+    }
+
+    public Integer getPriority() {
+        return priority;
+    }
+
+    public Instant getValidUntil() {
+        return validUntil;
     }
 
     public boolean allows(String instrument) {

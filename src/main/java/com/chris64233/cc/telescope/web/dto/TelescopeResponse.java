@@ -9,10 +9,12 @@ public record TelescopeResponse(
         String code,
         String name,
         long switchMinutes,
-        Set<String> instruments) {
+        Set<String> instruments,
+        long scheduleVersion) {
 
     public static TelescopeResponse from(Telescope telescope) {
         return new TelescopeResponse(telescope.getCode(), telescope.getName(),
-                telescope.getSwitchMinutes(), new TreeSet<>(telescope.getInstruments()));
+                telescope.getSwitchMinutes(), new TreeSet<>(telescope.getInstruments()),
+                telescope.getScheduleVersion());
     }
 }

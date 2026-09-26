@@ -10,6 +10,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToOne;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
@@ -54,11 +55,33 @@ public class Reservation {
 
     private Instant cancelledAt;
 
+    /** 抢占该预订的目标机会抢占单。 */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "preempted_by_id")
+    private Preemption preemptedBy;
+
+    /** 被抢占的时间点（进入 PENDING_REARRANGE 的时间）。 */
+    private Instant preemptedAt;
+
+    /** 若该预订是重排产生的新预订，指向被重排的原预订。 */
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "rearranged_from_id")
+    private Reservation rearrangedFrom;
+
+    /** 若该预订已完成重排，指向重排后的新预订。 */
+    @OneToOne(mappedBy = "rearrangedFrom", fetch = FetchType.LAZY)
+    private Reservation rearrangedTo;
+
     protected Reservation() {
     }
 
     public Reservation(String idempotencyKey, Proposal proposal, Telescope telescope, String instrument,
                        Instant startTime, Instant endTime, long durationMinutes) {
+        this(idempotencyKey, proposal, telescope, instrument, startTime, endTime, durationMinutes, null);
+    }
+
+    public Reservation(String idempotencyKey, Proposal proposal, Telescope telescope, String instrument,
+                       Instant startTime, Instant endTime, long durationMinutes, Reservation rearrangedFrom) {
         this.idempotencyKey = idempotencyKey;
         this.proposal = proposal;
         this.telescope = telescope;
@@ -68,6 +91,7 @@ public class Reservation {
         this.durationMinutes = durationMinutes;
         this.status = ReservationStatus.ACTIVE;
         this.createdAt = Instant.now();
+        this.rearrangedFrom = rearrangedFrom;
     }
 
     public Long getId() {
@@ -114,9 +138,42 @@ public class Reservation {
         return cancelledAt;
     }
 
+    public Preemption getPreemptedBy() {
+        return preemptedBy;
+    }
+
+    public Instant getPreemptedAt() {
+        return preemptedAt;
+    }
+
+    public Reservation getRearrangedFrom() {
+        return rearrangedFrom;
+    }
+
+    public Reservation getRearrangedTo() {
+        return rearrangedTo;
+    }
+
     public void cancel(Instant cancelledAt) {
         this.status = ReservationStatus.CANCELLED;
         this.cancelledAt = cancelledAt;
+    }
+
+    /** 被目标机会抢占：退出日程，等待在提案剩余有效期内重排。抢占单在保存后通过 {@link #assignPreemption} 关联。 */
+    public void markPendingRearrange(Instant preemptedAt) {
+        this.status = ReservationStatus.PENDING_REARRANGE;
+        this.preemptedAt = preemptedAt;
+    }
+
+    /** 关联导致该预订进入待重排状态的抢占单（抢占单持久化后调用）。 */
+    public void assignPreemption(Preemption preemption) {
+        this.preemptedBy = preemption;
+    }
+
+    /** 重排成功：原预订进入终态。 */
+    public void markPreemptedResolved(Reservation rearrangedTo) {
+        this.status = ReservationStatus.PREEMPTED;
+        this.rearrangedTo = rearrangedTo;
     }
 
     public boolean matches(String proposalCode, String telescopeCode, String instrument,

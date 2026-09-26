@@ -14,7 +14,10 @@ public record ReservationResponse(
         Instant startTime,
         Instant endTime,
         long durationMinutes,
-        ReservationStatus status) {
+        ReservationStatus status,
+        String preemptedByBusinessKey,
+        Long rearrangedFromId,
+        Long rearrangedToId) {
 
     public static ReservationResponse from(Reservation reservation) {
         return new ReservationResponse(reservation.getId(),
@@ -25,6 +28,9 @@ public record ReservationResponse(
                 reservation.getStartTime(),
                 reservation.getEndTime(),
                 reservation.getDurationMinutes(),
-                reservation.getStatus());
+                reservation.getStatus(),
+                reservation.getPreemptedBy() != null ? reservation.getPreemptedBy().getBusinessKey() : null,
+                reservation.getRearrangedFrom() != null ? reservation.getRearrangedFrom().getId() : null,
+                reservation.getRearrangedTo() != null ? reservation.getRearrangedTo().getId() : null);
     }
 }

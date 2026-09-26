@@ -4,10 +4,14 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Positive;
 
+import java.time.Instant;
 import java.util.Set;
 
 public record CreateProposalRequest(
         @NotBlank String code,
         @NotEmpty Set<String> instruments,
-        @Positive long totalQuotaMinutes) {
+        @Positive long totalQuotaMinutes,
+        Boolean targetOpportunity,
+        Integer priority,
+        Instant validUntil) {
 }

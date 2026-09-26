@@ -31,6 +31,10 @@ public class Telescope {
     @Column(nullable = false)
     private long switchMinutes;
 
+    /** 日程版本：每次该望远镜日程发生结构性变化（新建/取消/抢占/重排）后递增。 */
+    @Column(nullable = false)
+    private long scheduleVersion;
+
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "telescope_instruments", joinColumns = @JoinColumn(name = "telescope_id"))
     @Column(name = "instrument", nullable = false)
@@ -44,6 +48,7 @@ public class Telescope {
         this.name = name;
         this.switchMinutes = switchMinutes;
         this.instruments = new LinkedHashSet<>(instruments);
+        this.scheduleVersion = 0;
     }
 
     public Long getId() {
@@ -60,6 +65,14 @@ public class Telescope {
 
     public long getSwitchMinutes() {
         return switchMinutes;
+    }
+
+    public long getScheduleVersion() {
+        return scheduleVersion;
+    }
+
+    public void incrementScheduleVersion() {
+        this.scheduleVersion++;
     }
 
     public Set<String> getInstruments() {
