@@ -10,11 +10,13 @@ import com.chris64233.cc.telescope.domain.Reservation;
 import com.chris64233.cc.telescope.domain.ReservationStatus;
 import com.chris64233.cc.telescope.domain.ScheduleEntry;
 import com.chris64233.cc.telescope.domain.Telescope;
+import com.chris64233.cc.telescope.domain.WeatherRecovery;
 import com.chris64233.cc.telescope.repository.OpportunityProposalRepository;
 import com.chris64233.cc.telescope.repository.PreemptionRecordRepository;
 import com.chris64233.cc.telescope.repository.ProposalRepository;
 import com.chris64233.cc.telescope.repository.ReservationRepository;
 import com.chris64233.cc.telescope.repository.TelescopeRepository;
+import com.chris64233.cc.telescope.repository.WeatherRecoveryRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -39,6 +41,7 @@ public class PreemptionService {
     private final ProposalRepository proposalRepository;
     private final ReservationRepository reservationRepository;
     private final PreemptionRecordRepository preemptionRecordRepository;
+    private final WeatherRecoveryRepository weatherRecoveryRepository;
     private final BookingService bookingService;
 
     public PreemptionService(TelescopeRepository telescopeRepository,
@@ -46,12 +49,14 @@ public class PreemptionService {
                              ProposalRepository proposalRepository,
                              ReservationRepository reservationRepository,
                              PreemptionRecordRepository preemptionRecordRepository,
+                             WeatherRecoveryRepository weatherRecoveryRepository,
                              BookingService bookingService) {
         this.telescopeRepository = telescopeRepository;
         this.opportunityRepository = opportunityRepository;
         this.proposalRepository = proposalRepository;
         this.reservationRepository = reservationRepository;
         this.preemptionRecordRepository = preemptionRecordRepository;
+        this.weatherRecoveryRepository = weatherRecoveryRepository;
         this.bookingService = bookingService;
     }
 
@@ -176,26 +181,43 @@ public class PreemptionService {
         List<Object[]> scalars = reservationRepository
                 .findOverlapScalars(telescope, ReservationStatus.ACTIVE);
         record OverlapScalar(long reservationId, boolean opportunityAccount, long accountId,
-                             Instant s, Instant e) {
+                             Instant s, Instant e, Long fundedWeatherRecoveryId) {
         }
         List<OverlapScalar> allActive = scalars.stream()
                 .map(row -> new OverlapScalar(((Number) row[0]).longValue(),
                         Boolean.TRUE.equals(row[1]), ((Number) row[2]).longValue(),
-                        (Instant) row[3], (Instant) row[4]))
+                        (Instant) row[3], (Instant) row[4],
+                        row[5] == null ? null : ((Number) row[5]).longValue()))
                 .toList();
         List<OverlapScalar> overlapScalars = allActive.stream()
                 .filter(v -> v.s().isBefore(endTime) && v.e().isAfter(startTime))
                 .toList();
 
-        // 账户集合：申请方机会账户 + 各被覆盖预订的退款账户，按 (类型, ID) 全局排序后一次性加锁
+        // 账户集合：申请方机会账户 + 各被覆盖预订的退款账户（由天气恢复资格出资的预订不退配额，
+        // 其分钟退回资格，故不锁定/变更其配额账户），按 (类型, ID) 全局排序后一次性加锁
         List<AccountKey> accountKeys = new java.util.ArrayList<>();
         accountKeys.add(new AccountKey(true, applicantOpportunityId));
         for (OverlapScalar v : overlapScalars) {
-            accountKeys.add(new AccountKey(v.opportunityAccount(), v.accountId()));
+            if (v.fundedWeatherRecoveryId() == null) {
+                accountKeys.add(new AccountKey(v.opportunityAccount(), v.accountId()));
+            }
         }
         accountKeys.stream().distinct()
                 .sorted(Comparator.comparing(AccountKey::opportunity).thenComparing(AccountKey::id))
                 .forEach(this::lockAccount);
+
+        // 被覆盖、由天气恢复资格出资的预订：在预订行锁之前先锁其恢复资格（统一锁序），
+        // 抢占时把分钟退回资格而非退还配额。
+        List<Long> fundedRecoveryIds = overlapScalars.stream()
+                .map(OverlapScalar::fundedWeatherRecoveryId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .sorted()
+                .toList();
+        for (Long recoveryId : fundedRecoveryIds) {
+            weatherRecoveryRepository.findByIdForUpdate(recoveryId)
+                    .orElseThrow(() -> new ResourceNotFoundException("天气恢复资格不存在: " + recoveryId));
+        }
 
         OpportunityProposal opportunity = opportunityRepository.findById(applicantOpportunityId)
                 .orElseThrow(() -> new ResourceNotFoundException("机会提案不存在: " + opportunityCode));
@@ -225,10 +247,25 @@ public class PreemptionService {
                 .toList();
 
         List<QuotaChange> quotaChanges = new ArrayList<>();
+        // 由恢复资格出资的新预订被抢占取消后，若其原预订已进入 RECOVERED 终态，需要在统一顺序下
+        // 额外锁定并重开原预订行（同望远镜、按 ID 顺序），收集于此。
+        Set<Long> extraReservationIds = new java.util.TreeSet<>();
 
         for (Reservation reservation : overlapped) {
-            // 退款账户已在上面按序加锁，这里直接作用于受管实体
-            if (reservation.isOpportunityReservation()) {
+            WeatherRecovery funded = reservation.getFundedByWeatherRecovery();
+            if (funded != null) {
+                // 恢复资格出资的预订：不退配额，分钟退回资格；该预订不进入待重排，直接取消
+                boolean reopened = funded.releaseBack(reservation.getDurationMinutes(),
+                        reservation.getId(), now);
+                quotaChanges.add(new QuotaChange(
+                        reservation.isOpportunityReservation() ? "OPPORTUNITY" : "NORMAL",
+                        reservation.getOwnerCode(), reservation.getDurationMinutes(),
+                        "RETURN_WEATHER_RECOVERY"));
+                reservation.markPreemptedAndCancelled(opportunity, businessKey, now);
+                if (reopened) {
+                    extraReservationIds.add(funded.getOriginalReservation().getId());
+                }
+            } else if (reservation.isOpportunityReservation()) {
                 reservation.getOpportunity().refund(reservation.getDurationMinutes());
                 quotaChanges.add(new QuotaChange("OPPORTUNITY", reservation.getOwnerCode(),
                         reservation.getDurationMinutes(), "REFUND_PREEMPTED"));
@@ -239,6 +276,16 @@ public class PreemptionService {
                 quotaChanges.add(new QuotaChange("NORMAL", reservation.getOwnerCode(),
                         reservation.getDurationMinutes(), "REFUND_PREEMPTED"));
                 reservation.markPreempted(opportunity, businessKey, now);
+            }
+        }
+
+        // 统一顺序锁定并重开因全额恢复而处于 RECOVERED 的原预订（其天气事件关联仍保留）
+        if (!extraReservationIds.isEmpty()) {
+            List<Reservation> extra = reservationRepository.findByIdInForUpdate(extraReservationIds);
+            for (Reservation original : extra) {
+                if (original.getStatus() == ReservationStatus.RECOVERED) {
+                    original.reopenFromRecovered(now);
+                }
             }
         }
 

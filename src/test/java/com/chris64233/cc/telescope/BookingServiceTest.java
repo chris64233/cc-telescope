@@ -44,9 +44,18 @@ class BookingServiceTest {
     @Autowired
     private TelescopeRepository telescopeRepository;
 
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherRecoveryRepository weatherRecoveryRepository;
+
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherEventRepository weatherEventRepository;
+
     @BeforeEach
     void setUp() {
+        reservationRepository.clearFundedWeatherRecoveryReferences();
+        weatherRecoveryRepository.deleteAll();
         reservationRepository.deleteAll();
+        weatherEventRepository.deleteAll();
         proposalRepository.deleteAll();
         telescopeRepository.deleteAll();
         bookingService.registerTelescope("T1", "山顶望远镜", 30, Set.of("CAM", "SPEC"));

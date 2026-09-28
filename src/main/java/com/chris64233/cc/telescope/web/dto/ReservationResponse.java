@@ -22,7 +22,10 @@ public record ReservationResponse(
         String preemptedByOpportunityCode,
         String preemptedByBusinessKey,
         Long rescheduledToId,
-        Instant rescheduledAt) {
+        Instant rescheduledAt,
+        String weatherEventBusinessKey,
+        Long recoveredToId,
+        Instant recoveredAt) {
 
     public static ReservationResponse from(Reservation r) {
         return new ReservationResponse(r.getId(),
@@ -40,6 +43,9 @@ public record ReservationResponse(
                 r.getPreemptedBy() == null ? null : r.getPreemptedBy().getCode(),
                 r.getPreemptedByBusinessKey(),
                 r.getRescheduledToId(),
-                r.getRescheduledAt());
+                r.getRescheduledAt(),
+                r.getWeatherEvent() == null ? null : r.getWeatherEvent().getBusinessKey(),
+                r.getRecoveredToId(),
+                r.getRecoveredAt());
     }
 }

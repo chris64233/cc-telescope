@@ -4,10 +4,13 @@ import com.chris64233.cc.telescope.domain.Proposal;
 import com.chris64233.cc.telescope.domain.Reservation;
 import com.chris64233.cc.telescope.domain.ReservationStatus;
 import com.chris64233.cc.telescope.domain.Telescope;
+import com.chris64233.cc.telescope.domain.WeatherRecovery;
+import com.chris64233.cc.telescope.domain.WeatherRecoveryStatus;
 import com.chris64233.cc.telescope.repository.OpportunityProposalRepository;
 import com.chris64233.cc.telescope.repository.ProposalRepository;
 import com.chris64233.cc.telescope.repository.ReservationRepository;
 import com.chris64233.cc.telescope.repository.TelescopeRepository;
+import com.chris64233.cc.telescope.repository.WeatherRecoveryRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,15 +27,18 @@ public class BookingService {
     private final ProposalRepository proposalRepository;
     private final ReservationRepository reservationRepository;
     private final OpportunityProposalRepository opportunityProposalRepository;
+    private final WeatherRecoveryRepository weatherRecoveryRepository;
 
     public BookingService(TelescopeRepository telescopeRepository,
                           ProposalRepository proposalRepository,
                           ReservationRepository reservationRepository,
-                          OpportunityProposalRepository opportunityProposalRepository) {
+                          OpportunityProposalRepository opportunityProposalRepository,
+                          WeatherRecoveryRepository weatherRecoveryRepository) {
         this.telescopeRepository = telescopeRepository;
         this.proposalRepository = proposalRepository;
         this.reservationRepository = reservationRepository;
         this.opportunityProposalRepository = opportunityProposalRepository;
+        this.weatherRecoveryRepository = weatherRecoveryRepository;
     }
 
     @Transactional
@@ -169,24 +175,53 @@ public class BookingService {
         } else {
             throw new ResourceNotFoundException("预订不存在: " + reservationId);
         }
+
+        Long fundedRecoveryId = reservationRepository.findFundedRecoveryIdById(reservationId);
+        if (fundedRecoveryId != null) {
+            // 由天气恢复资格出资的（新）预订：不触碰配额账户，取消时把分钟退回资格。
+            return cancelRecoveryFundedReservation(reservationId, fundedRecoveryId);
+        }
+
         if (opportunityAccount) {
             opportunityProposalRepository.findByIdForUpdate(accountId);
         } else {
             proposalRepository.findByIdForUpdate(accountId);
         }
 
+        // 天气恢复资格行按统一顺序在预订行之前锁定（无资格时为空，无副作用）
+        List<WeatherRecovery> weatherGenerations =
+                weatherRecoveryRepository.findAllByReservationIdForUpdate(reservationId);
+
         // 预订实体的首次加载即加行锁，状态判断与退款在锁内完成
         Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException("预订不存在: " + reservationId));
         Instant now = Instant.now();
         switch (reservation.getStatus()) {
-            case CANCELLED, RESCHEDULED -> {
-                // 重复取消/已重排：幂等返回，不再触碰配额
+            case CANCELLED, RESCHEDULED, RECOVERED -> {
+                // 重复取消/已重排/已恢复：幂等返回，不再触碰配额
                 return reservation;
             }
             case PENDING_RESCHEDULE -> {
                 // 抢占时配额已归还；放弃待重排任务不再归还
                 reservation.abandonPending(now);
+                return reservation;
+            }
+            case WEATHER_BLOCKED -> {
+                // 放弃天气阻断预订：仅把尚未消耗的可恢复分钟一次性退还配额账户，
+                // 已恢复消耗的分钟不退还（对应新预订仍占用日程）。资格行已锁，不会与恢复排期/范围调整重复释放。
+                WeatherRecovery latest = weatherGenerations.isEmpty()
+                        ? null
+                        : weatherGenerations.get(weatherGenerations.size() - 1);
+                long refundMinutes = latest == null ? 0 : latest.getRemainingRecoverableMinutes();
+                if (refundMinutes > 0) {
+                    if (opportunityAccount) {
+                        reservation.getOpportunity().refund(refundMinutes);
+                    } else {
+                        reservation.getProposal().refund(refundMinutes);
+                    }
+                    latest.forfeit(now);
+                }
+                reservation.abandonWeatherBlocked(now);
                 return reservation;
             }
             case ACTIVE -> {
@@ -203,6 +238,36 @@ public class BookingService {
             }
             default -> throw new IllegalStateException("未知预订状态: " + reservation.getStatus());
         }
+    }
+
+    /**
+     * 取消一笔由天气恢复资格出资的有效预订：分钟退回恢复资格（不退还配额，避免重复释放）；
+     * 若退回使资格从 RECOVERED 终态重开，则把原预订恢复为天气阻断状态。
+     * 调用方已持有望远镜行锁；锁序：恢复资格行 → 新预订行 →（如需）原预订行。
+     */
+    private Reservation cancelRecoveryFundedReservation(Long reservationId, Long fundedRecoveryId) {
+        Instant now = Instant.now();
+        WeatherRecovery recovery = weatherRecoveryRepository.findByIdForUpdate(fundedRecoveryId)
+                .orElseThrow(() -> new ResourceNotFoundException("天气恢复资格不存在: " + fundedRecoveryId));
+        Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
+                .orElseThrow(() -> new ResourceNotFoundException("预订不存在: " + reservationId));
+        if (reservation.getStatus() == ReservationStatus.CANCELLED) {
+            return reservation;
+        }
+        if (!now.isBefore(reservation.getStartTime())) {
+            throw new CancellationNotAllowedException("预订已开始，不能取消");
+        }
+        boolean reopened = recovery.releaseBack(reservation.getDurationMinutes(), reservationId, now);
+        reservation.cancel(now);
+        if (reopened) {
+            Reservation original = reservationRepository
+                    .findByIdForUpdate(recovery.getOriginalReservation().getId())
+                    .orElseThrow(() -> new ResourceNotFoundException("原预订不存在"));
+            if (original.getStatus() == ReservationStatus.RECOVERED) {
+                original.reopenFromRecovered(now);
+            }
+        }
+        return reservation;
     }
 
     @Transactional(readOnly = true)
