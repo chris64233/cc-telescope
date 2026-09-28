@@ -180,13 +180,17 @@ public class BookingService {
                 .orElseThrow(() -> new ResourceNotFoundException("预订不存在: " + reservationId));
         Instant now = Instant.now();
         switch (reservation.getStatus()) {
-            case CANCELLED, RESCHEDULED -> {
-                // 重复取消/已重排：幂等返回，不再触碰配额
+            case CANCELLED, RESCHEDULED, WEATHER_RECOVERED -> {
+                // 重复取消/已重排/天气已恢复：幂等返回，不再触碰配额
                 return reservation;
             }
             case PENDING_RESCHEDULE -> {
                 // 抢占时配额已归还；放弃待重排任务不再归还
                 reservation.abandonPending(now);
+                return reservation;
+            }
+            case WEATHER_CANCELLED -> {
+                // 天气关闭时配额已释放；恢复凭证需通过天气放弃接口处理，这里幂等返回、不再归还
                 return reservation;
             }
             case ACTIVE -> {

@@ -32,11 +32,17 @@ class PreemptionApiTest {
     private com.chris64233.cc.telescope.repository.ProposalRepository proposalRepository;
     @Autowired
     private com.chris64233.cc.telescope.repository.TelescopeRepository telescopeRepository;
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherAffectedRecordRepository weatherAffectedRepository;
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherEventRepository weatherEventRepository;
 
     @BeforeEach
     void cleanDatabase() {
+        weatherAffectedRepository.deleteAll();
         preemptionRecordRepository.deleteAll();
         reservationRepository.deleteAll();
+        weatherEventRepository.deleteAll();
         opportunityRepository.deleteAll();
         proposalRepository.deleteAll();
         telescopeRepository.deleteAll();

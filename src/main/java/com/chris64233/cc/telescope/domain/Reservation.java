@@ -76,6 +76,16 @@ public class Reservation {
 
     private Instant rescheduledAt;
 
+    /** 中断此观测的天气关闭事件；进入天气中断状态时写入 */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "weather_event_id")
+    private WeatherEvent weatherEvent;
+
+    /** 天气恢复排期成功后新预订的 ID（与天气中断配对） */
+    private Long weatherRecoveredToId;
+
+    private Instant weatherRecoveredAt;
+
     protected Reservation() {
     }
 
@@ -172,6 +182,18 @@ public class Reservation {
         return rescheduledAt;
     }
 
+    public WeatherEvent getWeatherEvent() {
+        return weatherEvent;
+    }
+
+    public Long getWeatherRecoveredToId() {
+        return weatherRecoveredToId;
+    }
+
+    public Instant getWeatherRecoveredAt() {
+        return weatherRecoveredAt;
+    }
+
     public boolean isOpportunityReservation() {
         return opportunity != null;
     }
@@ -231,6 +253,45 @@ public class Reservation {
         this.status = ReservationStatus.RESCHEDULED;
         this.rescheduledToId = newReservationId;
         this.rescheduledAt = now;
+    }
+
+    /**
+     * 因天气关闭而中断尚未开始的有效观测：配额与时段已由调用方释放，
+     * 进入 WEATHER_CANCELLED，等待天气恢复排期。
+     */
+    public void markWeatherCancelled(WeatherEvent event, Instant now) {
+        if (status != ReservationStatus.ACTIVE) {
+            throw new IllegalStateException("只有有效预订可以因天气关闭中断，当前状态: " + status);
+        }
+        this.status = ReservationStatus.WEATHER_CANCELLED;
+        this.weatherEvent = event;
+        this.cancelledAt = now;
+    }
+
+    /**
+     * 天气范围缩小、该观测不再受影响且原时段可用：重新占用原时段（配额由调用方重新扣减），
+     * 从 WEATHER_CANCELLED 恢复为 ACTIVE。
+     */
+    public void restoreFromWeather(Instant now) {
+        if (status != ReservationStatus.WEATHER_CANCELLED) {
+            throw new IllegalStateException("只有天气中断的预订可以恢复有效，当前状态: " + status);
+        }
+        this.status = ReservationStatus.ACTIVE;
+        this.weatherEvent = null;
+        this.cancelledAt = null;
+    }
+
+    /**
+     * 天气恢复排期成功（可恢复分钟数全部用完）：原预订转为 WEATHER_RECOVERED，
+     * 指向最后建立的新预订。部分恢复时原预订保持 WEATHER_CANCELLED，不调用本方法。
+     */
+    public void markWeatherRecovered(Long newReservationId, Instant now) {
+        if (status != ReservationStatus.WEATHER_CANCELLED) {
+            throw new IllegalStateException("只有天气中断的预订可以完成恢复，当前状态: " + status);
+        }
+        this.status = ReservationStatus.WEATHER_RECOVERED;
+        this.weatherRecoveredToId = newReservationId;
+        this.weatherRecoveredAt = now;
     }
 
     public boolean matches(String proposalCode, String telescopeCode, String instrument,

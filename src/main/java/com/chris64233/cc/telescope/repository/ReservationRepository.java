@@ -43,6 +43,7 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
             left join fetch r.opportunity
             join fetch r.telescope
             left join fetch r.preemptedBy
+            left join fetch r.weatherEvent
             where r.id = :id
             """)
     Optional<Reservation> findDetailedById(@Param("id") Long id);
@@ -97,4 +98,41 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
             """)
     List<Reservation> findPendingForReschedule(@Param("status") ReservationStatus status,
                                                @Param("opportunityCode") String opportunityCode);
+
+    /**
+     * 天气流程加锁前的标量快照（语义同 {@link #findOverlapScalars}，但状态可指定，
+     * 用于范围缩小时读取 WEATHER_CANCELLED 预订的账户定位）。
+     * 每行：[id, 是否机会账户, 账户ID, startTime, endTime]。调用方须已持有望远镜行锁。
+     */
+    @Query("""
+            select r.id,
+                   case when r.opportunity is not null then true else false end,
+                   coalesce(r.opportunity.id, r.proposal.id),
+                   r.startTime, r.endTime
+            from Reservation r
+            where r.telescope = :telescope and r.status = :status
+            order by r.startTime asc, r.id asc
+            """)
+    List<Object[]> findScalarsByTelescopeAndStatus(@Param("telescope") Telescope telescope,
+                                                   @Param("status") ReservationStatus status);
+
+    /**
+     * 悲观锁住某望远镜上指定状态的全部预订行。天气流程在已持有望远镜行锁后调用，
+     * 使该望远镜上 ACTIVE 与 WEATHER_CANCELLED 预订的状态变更全局串行化。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from Reservation r where r.telescope = :telescope and r.status = :status "
+            + "order by r.startTime asc, r.id asc")
+    List<Reservation> findByTelescopeAndStatusForUpdate(@Param("telescope") Telescope telescope,
+                                                        @Param("status") ReservationStatus status);
+
+    /** 按 ID 集合只读加载预订（关联立即加载），用于天气恢复响应中展示新预订详情。 */
+    @Query("""
+            select r from Reservation r
+            left join fetch r.proposal
+            left join fetch r.opportunity
+            join fetch r.telescope
+            where r.id in :ids
+            """)
+    List<Reservation> findDetailedByIds(@Param("ids") java.util.Collection<Long> ids);
 }

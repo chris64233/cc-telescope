@@ -50,11 +50,17 @@ class PreemptionServiceTest {
     private OpportunityProposalRepository opportunityRepository;
     @Autowired
     private PreemptionRecordRepository preemptionRecordRepository;
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherAffectedRecordRepository weatherAffectedRepository;
+    @Autowired
+    private com.chris64233.cc.telescope.repository.WeatherEventRepository weatherEventRepository;
 
     @BeforeEach
     void setUp() {
+        weatherAffectedRepository.deleteAll();
         preemptionRecordRepository.deleteAll();
         reservationRepository.deleteAll();
+        weatherEventRepository.deleteAll();
         opportunityRepository.deleteAll();
         proposalRepository.deleteAll();
         telescopeRepository.deleteAll();
